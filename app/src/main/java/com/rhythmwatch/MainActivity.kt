@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -32,10 +33,17 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.PI
@@ -61,13 +69,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class RhythmProgram(val bpm: Int, val beat: Int, val sound: Int) {
-    fun encode() = listOf(bpm, beat, sound).joinToString("|")
+private data class RhythmProgram(val bpm: Int, val beat: Int) {
+    fun encode() = listOf(bpm, beat).joinToString("|")
     companion object {
         fun decode(raw: String?): RhythmProgram? = runCatching {
             val parts = raw!!.split('|')
-            require(parts.size >= 3)
-            RhythmProgram(parts[0].toInt().coerceIn(30,250), parts[1].toInt().coerceIn(0,9), parts[2].toInt().coerceIn(1,SOUND_COUNT))
+            require(parts.size >= 2)
+            RhythmProgram(parts[0].toInt().coerceIn(30,250), parts[1].toInt().coerceIn(0,9))
         }.getOrNull()
     }
 }
@@ -105,12 +113,12 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
 
     fun selectProgram(next: Int) {
         program = next.coerceIn(1,PROGRAM_COUNT)
-        val selected = programs[program-1] ?: RhythmProgram(120,4,1)
-        bpm = selected.bpm; beatCount = selected.beat; sound = selected.sound
+        val selected = programs[program-1] ?: RhythmProgram(120,4)
+        bpm = selected.bpm; beatCount = selected.beat
     }
 
     fun storeProgram() {
-        val saved = RhythmProgram(bpm, beatCount, sound)
+        val saved = RhythmProgram(bpm, beatCount)
         programs[program-1] = saved
         preferences.edit().putString("program_$program", saved.encode()).apply()
         storeSequence++
@@ -226,10 +234,7 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
                 Column(Modifier.widthIn(max = 560.dp).fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
                     Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF08090A), Color(0xFF202226), Color(0xFF08090A)))).padding(horizontal = sidePadding, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Spacer(Modifier.height(12.dp))
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Pulse200Logo(Modifier.weight(1f).padding(vertical = 8.dp), (availableWidth.value * .06f).coerceIn(18f, 25.2f).sp)
-                        TapTempoBank(::tapTempo)
-                    }
+                    TapTempoButton(Modifier.fillMaxWidth().height(66.dp), ::tapTempo)
                     Spacer(Modifier.height(12.dp))
                     LcdDisplay(bpm, beatCount, sound, program, playing, if(mode == 0) "PRACTICE" else "STAGE", storeConfirmation, tempoError, tempoFlashing, backlightAwake, batteryPercent)
                     Spacer(Modifier.height(9.dp))
@@ -275,12 +280,13 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth().height(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().height(20.dp), verticalAlignment = Alignment.CenterVertically) {
                         Spacer(Modifier.weight(1f))
-                        Text("TEMPO", Modifier.width(transportHeight), color = Labels, fontWeight = FontWeight.Bold, fontSize = 10.sp, textAlign = TextAlign.Center)
+                        Text("TEMPO", Modifier.width(transportHeight), color = Labels, fontWeight = FontWeight.Bold, fontSize = 10.sp, lineHeight = 14.sp, textAlign = TextAlign.Center)
                     }
+                    Spacer(Modifier.height(5.dp))
                     Row(Modifier.fillMaxWidth().height(transportHeight), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(if(playing) "■   STOP" else "▶   START / STOP", Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(15.dp)).background(Brush.verticalGradient(listOf(Color(0xFF37393B), Color(0xFF111213)))).pointerInput(playing) { detectTapGestures(onTap = {
+                    Text(if(playing) "■   STOP" else "▶   START / STOP", Modifier.weight(1f).fillMaxHeight().transportButtonSurface().pointerInput(playing) { detectTapGestures(onTap = {
                         registerInteraction()
                         val next = !playing
                         playing = next // Give immediate visual feedback; audio stream work runs off the UI thread.
@@ -318,19 +324,24 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
 }
 }
 
-@Composable
-private fun Pulse200Logo(modifier: Modifier, fontSize: androidx.compose.ui.unit.TextUnit) {
-    val condensed = remember {
-        FontFamily(android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.NORMAL))
-    }
-    Text("PULSE 200", modifier, color = Color(0xFFA6ACB1), fontFamily = condensed, fontWeight = FontWeight.SemiBold, fontSize = fontSize, letterSpacing = 1.sp, textAlign = TextAlign.Center, maxLines = 1)
-}
+private fun Modifier.transportButtonSurface(): Modifier =
+    clip(RoundedCornerShape(15.dp))
+        .background(Brush.verticalGradient(listOf(Color(0xFF37393B), Color(0xFF111213))))
 
 @Composable
-private fun TapTempoBank(onTap: () -> Unit) {
-    Column(Modifier.width(130.dp).clip(RoundedCornerShape(13.dp)).background(Brush.verticalGradient(listOf(Color(0xFF393B3D), Color(0xFF101112)))).pointerInput(Unit) { detectTapGestures(onTap = { onTap() }) }.padding(vertical = 9.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) { repeat(4) { Box(Modifier.size(13.dp).clip(CircleShape).background(Color(0xFF050606))) } }
-        Spacer(Modifier.height(4.dp)); Text("TAP TEMPO", color = Labels, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+private fun TapTempoButton(modifier: Modifier, onTap: () -> Unit) {
+    Column(
+        modifier.transportButtonSurface().clickable(role = Role.Button, onClick = onTap),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            repeat(5) {
+                Box(Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF050606)))
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        Text("TAP TEMPO", color = Silver, fontWeight = FontWeight.Black, fontSize = 18.sp, letterSpacing = 1.sp)
     }
 }
 
@@ -343,19 +354,48 @@ private fun LcdDisplay(bpm: Int, beat: Int, sound: Int, program: Int, playing: B
     }
     val ink = if (backlightAwake) LCDInk else Color(0xFF6E858E)
     val display = if (backlightAwake) Brush.verticalGradient(listOf(Color(0xFF28C9F3), Color(0xFF4AD8FA), Color(0xFF21BEEB))) else Brush.verticalGradient(listOf(Color(0xFF0A2027), Color(0xFF102A32), Color(0xFF08191F)))
-    Row(Modifier.fillMaxWidth().height(132.dp).clip(RoundedCornerShape(12.dp)).background(display).padding(horizontal = 9.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-        LcdField(modeName, program.toString().padStart(2, '0'), if(storeConfirmation) "✓ STORED" else "▣ ${batteryPercent}%", 37.sp, ink, Modifier.weight(1.3f))
-        DividerLine(95.dp)
-        LcdField("TEMPO", tempoError ?: bpm.toString(), if(playing) "▶ TEMPO" else "TEMPO", if(tempoError != null) 47.sp else 57.sp, ink, Modifier.weight(2.2f), if(tempoFlashing && !flashVisible) 0f else 1f)
-        DividerLine(95.dp)
-        LcdField("BEAT", beat.toString(), "BEAT", 37.sp, ink, Modifier.weight(.9f))
-        DividerLine(95.dp)
-        LcdField("SOUND", sound.toString(), "SOUND", 37.sp, ink, Modifier.weight(.8f))
+    Column(Modifier.fillMaxWidth().height(132.dp).clip(RoundedCornerShape(12.dp)).background(display).padding(horizontal = 9.dp, vertical = 9.dp)) {
+        Row(Modifier.fillMaxWidth().weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            LcdField(modeName, program.toString().padStart(2, '0'), 37.sp, ink, Modifier.weight(1.3f))
+            DividerLine(ink)
+            LcdField("TEMPO", tempoError ?: bpm.toString(), if(tempoError != null) 47.sp else 57.sp, ink, Modifier.weight(2.2f), if(tempoFlashing && !flashVisible) 0f else 1f)
+            DividerLine(ink)
+            LcdField("BEAT", beat.toString(), 37.sp, ink, Modifier.weight(.9f))
+            DividerLine(ink)
+            LcdField("SOUND", sound.toString(), 37.sp, ink, Modifier.weight(.8f))
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(Modifier.fillMaxWidth().height(18.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Canvas(Modifier.width(12.dp).height(7.dp)) {
+                    val stroke = .8.dp.toPx()
+                    val bodyWidth = size.width - 1.5.dp.toPx()
+                    drawRoundRect(ink, size = Size(bodyWidth, size.height), cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx()), style = Stroke(stroke))
+                    drawRect(ink, Offset(bodyWidth, size.height * .30f), Size(1.5.dp.toPx(), size.height * .40f))
+                    val inset = 1.5.dp.toPx()
+                    drawRect(ink, Offset(inset, inset), Size((bodyWidth - inset * 2) * batteryPercent / 100f, size.height - inset * 2))
+                }
+                Text("${batteryPercent}%", color = ink, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                if (storeConfirmation) Text("✓ STORED", color = ink, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) {
+                Canvas(Modifier.size(7.dp)) {
+                    if (playing) {
+                        drawPath(Path().apply { moveTo(0f, 0f); lineTo(size.width, size.height / 2); lineTo(0f, size.height); close() }, ink)
+                    } else {
+                        drawRect(ink)
+                    }
+                }
+                Text(if (playing) "PLAY" else "STOP", color = ink, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 
 @Composable
-private fun LcdField(title: String, value: String, footer: String, valueSize: androidx.compose.ui.unit.TextUnit, ink: Color, modifier: Modifier, valueAlpha: Float = 1f) {
+private fun LcdField(title: String, value: String, valueSize: androidx.compose.ui.unit.TextUnit, ink: Color, modifier: Modifier, valueAlpha: Float = 1f) {
     Column(modifier.fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(Modifier.fillMaxWidth().height(18.dp), contentAlignment = Alignment.Center) {
             Text(title, color = ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
@@ -363,15 +403,12 @@ private fun LcdField(title: String, value: String, footer: String, valueSize: an
         Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             SegmentNumber(value, valueSize, ink, valueAlpha)
         }
-        Box(Modifier.fillMaxWidth().height(18.dp), contentAlignment = Alignment.Center) {
-            Text(footer, color = ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-        }
     }
 }
 
 @Composable
-private fun DividerLine(height: androidx.compose.ui.unit.Dp) {
-    Box(Modifier.width(1.dp).height(height).background(LCDInk.copy(alpha = .65f)))
+private fun DividerLine(ink: Color) {
+    Box(Modifier.width(1.dp).fillMaxHeight().padding(vertical = 3.dp).background(ink.copy(alpha = .35f)))
 }
 
 @Composable
@@ -381,7 +418,18 @@ private fun SegmentNumber(value: String, size: androidx.compose.ui.unit.TextUnit
 
 @Composable
 private fun HardwareButton(modifier: Modifier = Modifier) {
-    Box(modifier.clip(CircleShape).background(Brush.verticalGradient(listOf(Color(0xFF45484B), Color(0xFF181A1C), Color(0xFF050607)))).padding(5.dp).clip(CircleShape).background(Brush.verticalGradient(listOf(Color(0xFF202326), Color(0xFF08090A)))))
+    Canvas(modifier) {
+        val center = Offset(size.width / 2, size.height / 2)
+        val radius = size.minDimension * .47f
+        drawCircle(Color.Black.copy(alpha = .55f), radius, center + Offset(0f, 2.dp.toPx()))
+        drawCircle(Brush.verticalGradient(listOf(Color(0xFF626A71), Color(0xFF343C43), Color(0xFF242C32))), radius, center)
+        drawCircle(Color(0xFF0C1115), radius - 2.dp.toPx(), center)
+        val faceRadius = radius - 4.dp.toPx()
+        drawCircle(Brush.verticalGradient(listOf(Color(0xFF30373D), Color(0xFF1B2228), Color(0xFF11171C))), faceRadius, center)
+        drawCircle(Color(0xFF747F88).copy(alpha = .35f), radius - .5.dp.toPx(), center, style = Stroke(.7.dp.toPx()))
+        drawArc(Color(0xFFB3BDC5).copy(alpha = .27f), 210f, 120f, false,
+            Offset(center.x - faceRadius, center.y - faceRadius), Size(faceRadius * 2, faceRadius * 2), style = Stroke(.8.dp.toPx(), cap = StrokeCap.Round))
+    }
 }
 
 @Composable
@@ -413,11 +461,7 @@ private fun Fader(label: String, value: Float, accent: Boolean, modifier: Modifi
             Text(label, Modifier.padding(horizontal = 3.dp), color = Labels, fontSize = 8.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
         Box(Modifier.fillMaxWidth().height(32.dp), contentAlignment = Alignment.Center) {
-            if (label == "TRIPLET") {
-                TripletIcon()
-            } else {
-                Text(when(label) { "QUARTER" -> "♪"; "EIGHTH" -> "♫"; "SIXTEENTH" -> "♬"; "BEAT" -> ""; else -> "◖))" }, color = Silver, fontSize = 21.sp, lineHeight = 24.sp)
-            }
+            if (label != "BEAT") FaderIcon(label, Modifier.size(28.dp))
         }
         VerticalFader(value, active, Modifier.weight(1f).fillMaxWidth()) { onChange(it) }
         Box(Modifier.fillMaxWidth().height(18.dp), contentAlignment = Alignment.Center) {
@@ -427,17 +471,51 @@ private fun Fader(label: String, value: Float, accent: Boolean, modifier: Modifi
 }
 
 @Composable
-private fun TripletIcon(modifier: Modifier = Modifier) {
-    Column(modifier.height(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("3", color = Silver, fontSize = 8.sp, lineHeight = 8.sp, fontWeight = FontWeight.Normal)
-        Canvas(Modifier.width(26.dp).height(16.dp)) {
-            val xs = listOf(size.width * .18f, size.width * .50f, size.width * .82f)
-            val headY = size.height * .72f
-            xs.forEach { x ->
-                drawOval(Silver, Offset(x - 2.dp.toPx(), headY - 1.5.dp.toPx()), Size(5.dp.toPx(), 3.5.dp.toPx()))
-                drawLine(Silver, Offset(x + 2.dp.toPx(), headY), Offset(x + 2.dp.toPx(), 2.dp.toPx()), 1.dp.toPx())
+private fun FaderIcon(label: String, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val unit = size.minDimension / 32f
+        withTransform({ scale(unit, unit, pivot = Offset.Zero) }) {
+            fun noteHead(x: Float) {
+                rotate(-15f, Offset(x, 25f)) {
+                    drawOval(Silver, Offset(x - 3.3f, 22.8f), Size(6.6f, 4.4f))
+                }
             }
-            drawLine(Silver, Offset(xs.first() + 2.dp.toPx(), 2.dp.toPx()), Offset(xs.last() + 2.dp.toPx(), 2.dp.toPx()), 1.dp.toPx())
+            when (label) {
+                "QUARTER" -> {
+                    noteHead(14f)
+                    drawLine(Silver, Offset(17f, 24.5f), Offset(17f, 6f), 1.5f)
+                }
+                "EIGHTH", "SIXTEENTH", "TRIPLET" -> {
+                    val triplet = label == "TRIPLET"
+                    val xs = if (triplet) listOf(5f, 15.5f, 26f) else listOf(7f, 22f)
+                    val top = if (triplet) 13f else 7f
+                    xs.forEach { x ->
+                        noteHead(x)
+                        drawLine(Silver, Offset(x + 3f, 24.5f), Offset(x + 3f, top), 1.5f)
+                    }
+                    drawLine(Silver, Offset(xs.first() + 3f, top), Offset(xs.last() + 3f, top), 1.8f)
+                    if (label == "SIXTEENTH") drawLine(Silver, Offset(xs.first() + 3f, top + 4f), Offset(xs.last() + 3f, top + 4f), 1.8f)
+                    if (triplet) {
+                        val three = Path().apply {
+                            moveTo(13.5f, 3.5f)
+                            cubicTo(19.5f, 1f, 20.5f, 7f, 16f, 7f)
+                            cubicTo(21f, 7f, 20f, 12f, 13.5f, 10f)
+                        }
+                        drawPath(three, Silver, style = Stroke(1.2f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    }
+                }
+                "MASTER" -> {
+                    drawPath(Path().apply {
+                        moveTo(5f, 13f); lineTo(10f, 13f); lineTo(17f, 8f)
+                        lineTo(17f, 26f); lineTo(10f, 21f); lineTo(5f, 21f); close()
+                    }, Silver)
+                    val waves = Path().apply {
+                        moveTo(21f, 12f); cubicTo(24f, 15f, 24f, 19f, 21f, 22f)
+                        moveTo(25f, 8f); cubicTo(31f, 13f, 31f, 21f, 25f, 26f)
+                    }
+                    drawPath(waves, Silver, style = Stroke(1.5f, cap = StrokeCap.Round))
+                }
+            }
         }
     }
 }

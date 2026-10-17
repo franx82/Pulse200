@@ -11,3 +11,7 @@ endif()
 add_library(rhythmwatch SHARED rhythm_engine.cpp)
 target_link_libraries(rhythmwatch PRIVATE oboe)
 target_compile_features(rhythmwatch PRIVATE cxx_std_20)
+target_link_options(rhythmwatch PRIVATE
+  "-Wl,-z,max-page-size=16384"
+  "-Wl,-z,common-page-size=16384"
+)
