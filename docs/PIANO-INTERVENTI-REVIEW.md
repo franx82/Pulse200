@@ -74,10 +74,10 @@ flowchart LR
 Riferimento: [workflow Android](../.github/workflows/android.yml).
 
 - [x] **F10 — Correggere l’installazione SDK del workflow.** Dichiarare `packages: platform-tools` per impedire all’azione di setup, nella versione usata dal workflow, di richiedere il pacchetto Android `tools` rimosso. Build e controlli Android passano localmente.
-- [ ] Eseguire nella pipeline compilazione, lint e test deterministici introdotti nelle fasi audio e di stato.
+- [x] Eseguire nella pipeline compilazione, lint e test deterministici introdotti nelle fasi audio e di stato. Run [GitHub Actions 39170284060](https://github.com/franx82/Pulse200/actions/runs/39170284060): tutti i passaggi riusciti.
 - [ ] Verificare che un errore in ciascun passaggio fallisca la run e che l’APK venga pubblicato come artefatto solo dopo controlli riusciti.
 
-**Criterio di completamento:** una nuova run GitHub Actions completa build, controlli e upload senza errori; il link della run e l’artefatto vengono annotati qui o nelle note della release.
+**Criterio di completamento:** la run [39170284060](https://github.com/franx82/Pulse200/actions/runs/39170284060) completa build, controlli e upload senza errori. Artefatto: `Pulse200-debug`.
 
 ## Fase 5 — layout adattabile e accessibile
 
@@ -126,7 +126,7 @@ Riferimento: [workflow Android](../.github/workflows/android.yml).
 - F01/F02/F04 e F07/F08 sono implementati; i test deterministici C++ e i test unitari Tap Tempo/MODE passano localmente.
 - Il controller nel servizio, il recupero audio, notifiche e stop, persistenza differita, validazione JNI, diagnostica debug e layout/accessibilità sono stati implementati. La fase 5 è stata verificata sul Pixel; restano aperte le verifiche delle fasi 2 e 6 indicate sopra.
 - Test su Pixel riportati dall’utente il 18 ottobre: superati avvio/arresto, background/notifica, Practice/Stage e cambio MODE, Tap Tempo/limiti/persistenza, portrait/landscape/font ingrandito, TalkBack e ridimensionamento in split screen. Rimangono da provare il cambio uscita/cuffie e la ricreazione esplicita dell’Activity.
-- Il workflow esegue test nativi, test Android, lint e build prima dell’upload APK. I controlli locali passano; la prima run remota ha rivelato il pacchetto `tools` implicito di `setup-android@v3`, ora escluso esplicitamente. La nuova run e l’artefatto restano da verificare.
+- Il workflow esegue test nativi, test Android, lint e build prima dell’upload APK. La run 39170284060 ha superato tutti i passaggi e caricato l’artefatto `Pulse200-debug`; la prima run aveva rivelato il pacchetto `tools` implicito di `setup-android@v3`, ora escluso esplicitamente.
 - Il cambio uscita/cuffie resta il controllo audio hardware aperto; latenza e jitter acustici non sono stati misurati.
 - Non sono state configurate firma o pubblicazione release: canale e chiave stabile restano decisioni di distribuzione.
 - Modifiche locali già presenti prima del piano: `README.md`, `app/build.gradle.kts`, `app/src/main/cpp/CMakeLists.txt`, `app/src/main/java/com/rhythmwatch/MainActivity.kt`. Non annullarle durante gli interventi.
