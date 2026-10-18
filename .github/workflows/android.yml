@@ -23,6 +23,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      - name: Configure native renderer tests
+        run: cmake -S tests/native -B build/native-tests -DCMAKE_BUILD_TYPE=Debug
+      - name: Build native renderer tests
+        run: cmake --build build/native-tests --parallel
+      - name: Run native renderer tests
+        run: ctest --test-dir build/native-tests --output-on-failure
+      - name: Run Android unit tests
+        run: ./gradlew testDebugUnitTest
+      - name: Run Android lint
+        run: ./gradlew lintDebug
       - name: Build debug APK
         run: ./gradlew assembleDebug
       - uses: actions/upload-artifact@v4

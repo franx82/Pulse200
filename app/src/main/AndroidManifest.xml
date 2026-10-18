@@ -2,6 +2,7 @@
     <uses-feature android:name="android.hardware.audio.output" android:required="true" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application android:theme="@style/Theme.RhythmWatch" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="true">
         <service android:name=".MetronomeService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
         <activity android:name=".MainActivity" android:exported="true">

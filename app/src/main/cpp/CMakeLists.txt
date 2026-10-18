@@ -8,7 +8,7 @@ else()
   FetchContent_Declare(oboe GIT_REPOSITORY https://github.com/google/oboe.git GIT_TAG 1.9.3)
   FetchContent_MakeAvailable(oboe)
 endif()
-add_library(rhythmwatch SHARED rhythm_engine.cpp)
+add_library(rhythmwatch SHARED rhythm_engine.cpp rhythm_renderer.cpp)
 target_link_libraries(rhythmwatch PRIVATE oboe)
 target_compile_features(rhythmwatch PRIVATE cxx_std_20)
 target_link_options(rhythmwatch PRIVATE

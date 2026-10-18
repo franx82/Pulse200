@@ -18,10 +18,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.concurrent.atomic.AtomicInteger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -44,6 +40,15 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.PI
@@ -60,99 +65,146 @@ private const val PROGRAM_COUNT = 30
 private const val SOUND_COUNT = 2
 
 class MainActivity : ComponentActivity() {
-    private var engine: AudioEngine? = null
+    private lateinit var notificationPermissionLauncher: androidx.activity.result.ActivityResultLauncher<String>
+    private var controller by mutableStateOf<MetronomeService?>(null)
+    private var serviceBound = false
+    private val serviceConnection = object : android.content.ServiceConnection {
+        override fun onServiceConnected(name: android.content.ComponentName?, binder: android.os.IBinder?) {
+            controller = (binder as? MetronomeService.LocalBinder)?.controller
+        }
+
+        override fun onServiceDisconnected(name: android.content.ComponentName?) {
+            controller = null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        engine = AudioEngine()
+        notificationPermissionLauncher = registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (!granted) {
+                android.widget.Toast.makeText(
+                    this,
+                    "La riproduzione continua; le notifiche sono disattivate.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
-        setContent { RhythmWatchApp(engine!!, getSharedPreferences("rhythm_watch", MODE_PRIVATE)) }
+        setContent {
+            RhythmWatchApp(
+                controller,
+                getSharedPreferences("rhythm_watch", MODE_PRIVATE),
+                ::requestNotificationPermission
+            )
+        }
     }
-}
 
-private data class RhythmProgram(val bpm: Int, val beat: Int) {
-    fun encode() = listOf(bpm, beat).joinToString("|")
-    companion object {
-        fun decode(raw: String?): RhythmProgram? = runCatching {
-            val parts = raw!!.split('|')
-            require(parts.size >= 2)
-            RhythmProgram(parts[0].toInt().coerceIn(30,250), parts[1].toInt().coerceIn(0,9))
-        }.getOrNull()
+    override fun onStart() {
+        super.onStart()
+        serviceBound = bindService(
+            android.content.Intent(this, MetronomeService::class.java),
+            serviceConnection,
+            BIND_AUTO_CREATE
+        )
+    }
+
+    override fun onStop() {
+        if (serviceBound) {
+            unbindService(serviceConnection)
+            serviceBound = false
+            controller = null
+        }
+        super.onStop()
+    }
+
+    private fun requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33 ||
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return
+        val preferences = getSharedPreferences("rhythm_watch", MODE_PRIVATE)
+        if (!preferences.getBoolean("notification_permission_asked", false)) {
+            preferences.edit().putBoolean("notification_permission_asked", true).apply()
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 }
 
 @Composable
-@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.SharedPreferences) {
+private fun RhythmWatchApp(controller: MetronomeService?, preferences: android.content.SharedPreferences, requestNotificationPermission: () -> Unit) {
     val context = LocalContext.current
-    val playbackScope = rememberCoroutineScope()
-    val audioDispatcher = remember { Dispatchers.IO.limitedParallelism(1) }
-    val playbackRequest = remember { AtomicInteger(0) }
-    var bpm by remember { mutableIntStateOf(preferences.getInt("last_bpm",120).coerceIn(30,250)) }
-    var playing by remember { mutableStateOf(false) }
-    var beatCount by remember { mutableIntStateOf(preferences.getInt("last_beat",4).coerceIn(0,9)) }
-    var sound by remember { mutableIntStateOf(preferences.getInt("last_sound",1).coerceIn(1,SOUND_COUNT)) }
-    var program by remember { mutableIntStateOf(preferences.getInt("last_program",1).coerceIn(1,PROGRAM_COUNT)) }
-    var mode by remember { mutableIntStateOf(preferences.getInt("last_mode",0).coerceIn(0,1)) }
+    val fallbackState = remember(preferences) { initialUiState(preferences) }
+    val boundState = controller?.state?.collectAsState()
+    val uiState = boundState?.value ?: fallbackState
+    val bpm = uiState.bpm
+    val playing = uiState.playing
+    val starting = uiState.starting
+    val beatCount = uiState.beatCount
+    val sound = uiState.sound
+    val program = uiState.program
+    val mode = uiState.mode
+    val modePending = PlaybackModePolicy.changeAppliesOnNextStart(playing, uiState.mode, uiState.sessionMode)
+    val levels = uiState.levels
     var storeConfirmation by remember { mutableStateOf(false) }
-    var storeSequence by remember { mutableIntStateOf(0) }
-    var lastTap by remember { mutableLongStateOf(0L) }
-    var tapCount by remember { mutableIntStateOf(0) }
+    var tapSequence by remember { mutableStateOf(TapTempoSequenceState()) }
     var tempoError by remember { mutableStateOf<String?>(null) }
     var tempoFlashing by remember { mutableStateOf(false) }
     var backlightEnabled by remember { mutableStateOf(true) }
     var backlightAwake by remember { mutableStateOf(true) }
     var lastInteraction by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
     var batteryPercent by remember { mutableIntStateOf((context.getSystemService(android.content.Context.BATTERY_SERVICE) as BatteryManager).getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0,100)) }
-    val tapIntervals = remember { mutableStateListOf<Long>() }
-    val programs = remember { mutableStateListOf<RhythmProgram?>(*Array(PROGRAM_COUNT) { null }).also { slots ->
-        repeat(PROGRAM_COUNT) { slots[it] = RhythmProgram.decode(preferences.getString("program_${it+1}", null)) }
-    } }
-    val levels = remember { mutableStateListOf(.80f, .55f, .90f, .40f, 1f, 1f).also { current ->
-        preferences.getString("last_levels", null)?.split(',')?.takeIf { it.size == 6 }?.forEachIndexed { i, value -> runCatching { current[i] = value.toFloat().coerceIn(0f,1f) } }
-    } }
-
-    fun selectProgram(next: Int) {
-        program = next.coerceIn(1,PROGRAM_COUNT)
-        val selected = programs[program-1] ?: RhythmProgram(120,4)
-        bpm = selected.bpm; beatCount = selected.beat
-    }
-
-    fun storeProgram() {
-        val saved = RhythmProgram(bpm, beatCount)
-        programs[program-1] = saved
-        preferences.edit().putString("program_$program", saved.encode()).apply()
-        storeSequence++
-    }
 
     fun registerInteraction() {
         lastInteraction = android.os.SystemClock.elapsedRealtime()
         if (backlightEnabled) backlightAwake = true
     }
 
+    fun togglePlayback() {
+        registerInteraction()
+        if (playing || starting) {
+            controller?.stopPlayback()
+        } else {
+            requestNotificationPermission()
+            val serviceIntent = android.content.Intent(context, MetronomeService::class.java)
+                .setAction(MetronomeService.ACTION_START)
+            ContextCompat.startForegroundService(context, serviceIntent)
+            controller?.startPlayback()
+        }
+    }
+
+    fun activateControl(index: Int) {
+        registerInteraction()
+        when (index) {
+            1 -> controller?.storeProgram()
+            2 -> controller?.setSound(sound % SOUND_COUNT + 1)
+            3 -> controller?.setMode((mode + 1) % 2)
+            4 -> controller?.setBeatCount((beatCount + 1) % 10)
+        }
+    }
+
+    fun longPressControl(index: Int) {
+        if (index == 1) {
+            registerInteraction()
+            backlightEnabled = !backlightEnabled
+            backlightAwake = backlightEnabled
+        }
+    }
+
     fun tapTempo() {
         val now = android.os.SystemClock.elapsedRealtime()
         registerInteraction()
-        if (lastTap == 0L || now - lastTap > 2_500L) {
-            tapIntervals.clear()
-            tapCount = 1
-            lastTap = now
+        tapSequence = TapTempoSequence.tap(tapSequence, now)
+        if (tapSequence.tapCount == 1) {
             tempoError = null
             tempoFlashing = false
-            return
         }
-        val interval = now - lastTap
-        lastTap = now
-        tapCount++
-        tapIntervals.add(interval)
-        while (tapIntervals.size > 4) tapIntervals.removeAt(0)
-        if (tapCount >= 5 && tapIntervals.isNotEmpty()) {
-            val measured = tapIntervals.map { 60_000.0 / it }.average()
-            tempoError = when {
-                measured < 30.0 -> "Lo"
-                measured > 250.0 -> "Hi"
-                else -> null
-            }
-            bpm = measured.roundToInt().coerceIn(30,250)
+        tapSequence.estimate?.let { estimate ->
+            tempoError = estimate.error
+            estimate.bpm?.let { controller?.setTempo(it) }
             tempoFlashing = false
         }
     }
@@ -169,22 +221,16 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    LaunchedEffect(engine) { engine.configure(bpm, levels.toList()); engine.setBeat(beatCount) }
-    LaunchedEffect(bpm, levels.toList()) { engine.configure(bpm, levels.toList()) }
-    LaunchedEffect(beatCount) { engine.setBeat(beatCount) }
-    LaunchedEffect(sound) { engine.setSound(sound) }
-    LaunchedEffect(mode) { engine.setMode(mode) }
-    LaunchedEffect(lastTap) {
-        val tapAt = lastTap
+    LaunchedEffect(tapSequence.lastTapMs) {
+        val tapAt = tapSequence.lastTapMs
         if (tapAt > 0L) {
-            kotlinx.coroutines.delay(2_500)
-            if (lastTap == tapAt) {
-                tapCount = 0
-                tapIntervals.clear()
+            kotlinx.coroutines.delay(TapTempoSequence.TIMEOUT_MS + 1)
+            if (TapTempoSequence.hasTimedOut(tapSequence, android.os.SystemClock.elapsedRealtime())) {
+                tapSequence = TapTempoSequence.clearAfterTimeout(tapSequence)
                 tempoError = null
                 tempoFlashing = true
                 kotlinx.coroutines.delay(1_000)
-                if (lastTap == tapAt) tempoFlashing = false
+                if (TapTempoSequence.hasTimedOut(tapSequence, android.os.SystemClock.elapsedRealtime())) tempoFlashing = false
             }
         }
     }
@@ -198,124 +244,108 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
             backlightAwake = false
         }
     }
-    LaunchedEffect(engine, playing, program, mode) {
-        while (playing) {
-            kotlinx.coroutines.delay(25)
-            if (engine.consumeStageComplete()) {
-                withContext(audioDispatcher) { engine.close() }
-                playing = false
-                context.stopService(android.content.Intent(context, MetronomeService::class.java).setAction(MetronomeService.ACTION_STOP))
-                val stageMode = mode
-                selectProgram(program % PROGRAM_COUNT + 1)
-                mode = stageMode
-                break
-            }
-        }
-    }
-    LaunchedEffect(storeSequence) {
-        if (storeSequence > 0) {
+    LaunchedEffect(uiState.storeSequence) {
+        if (uiState.storeSequence > 0) {
             storeConfirmation = true
             kotlinx.coroutines.delay(2_000)
             storeConfirmation = false
         }
     }
-    LaunchedEffect(bpm, beatCount, sound, program, mode, levels.toList()) {
-        preferences.edit().putInt("last_bpm", bpm).putInt("last_beat", beatCount)
-            .putInt("last_sound", sound).putInt("last_program", program).putInt("last_mode", mode)
-            .putString("last_levels", levels.joinToString(",")).apply()
+    LaunchedEffect(uiState.audioError) {
+        if (uiState.audioError) {
+            android.widget.Toast.makeText(
+                context,
+                "Uscita audio non disponibile. Tocca START per riprovare.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     MaterialTheme {
         Surface(Modifier.fillMaxSize(), color = Color(0xFF050607)) {
             BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
                 val availableWidth = maxWidth
+                val compact = maxHeight < 680.dp || availableWidth < 360.dp
+                val veryCompact = maxHeight < 480.dp
+                val fontScale = LocalDensity.current.fontScale
                 val sidePadding = (availableWidth * .035f).coerceIn(10.dp, 22.dp)
-                val transportHeight = (maxHeight * .105f).coerceIn(72.dp, 92.dp)
+                val verticalPadding = if (veryCompact) 3.dp else if (compact) 5.dp else 8.dp
+                val sectionGap = if (veryCompact) 3.dp else if (compact) 6.dp else 12.dp
+                val tapHeight = if (veryCompact) 48.dp else if (compact) 54.dp else 66.dp
+                val baseDisplayHeight = if (veryCompact) 84.dp else if (compact) 108.dp else 132.dp
+                val displayHeight = baseDisplayHeight +
+                    (if (veryCompact) 50.dp else if (compact) 30.dp else 20.dp) * (fontScale - 1f).coerceAtLeast(0f)
+                val transportHeight = when {
+                    veryCompact -> 50.dp
+                    compact -> (maxHeight * .11f).coerceIn(58.dp, 72.dp)
+                    else -> (maxHeight * .105f).coerceIn(72.dp, 92.dp)
+                }
+                val controlButtonSize = if (veryCompact) 32.dp else if (compact) 38.dp else (availableWidth * .12f).coerceIn(38.dp, 52.dp)
+                val compactControlsHeight = maxOf(60.dp, 60.dp + 12.dp * (fontScale - 1f).coerceAtLeast(0f))
                 Column(Modifier.widthIn(max = 560.dp).fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF08090A), Color(0xFF202226), Color(0xFF08090A)))).padding(horizontal = sidePadding, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Spacer(Modifier.height(12.dp))
-                    TapTempoButton(Modifier.fillMaxWidth().height(66.dp), ::tapTempo)
-                    Spacer(Modifier.height(12.dp))
-                    LcdDisplay(bpm, beatCount, sound, program, playing, if(mode == 0) "PRACTICE" else "STAGE", storeConfirmation, tempoError, tempoFlashing, backlightAwake, batteryPercent)
-                    Spacer(Modifier.height(9.dp))
-                    Row(Modifier.fillMaxWidth().weight(1f).heightIn(min = 150.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF08090A), Color(0xFF202226), Color(0xFF08090A)))).padding(horizontal = sidePadding, vertical = verticalPadding), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Spacer(Modifier.height(if (veryCompact) 1.dp else sectionGap))
+                    TapTempoButton(Modifier.fillMaxWidth().height(tapHeight), compact, ::tapTempo)
+                    Spacer(Modifier.height(sectionGap))
+                    LcdDisplay(bpm, beatCount, sound, program, playing, if(mode == 0) "PRACTICE" else "STAGE", storeConfirmation, tempoError, tempoFlashing, backlightAwake, batteryPercent, uiState.audioError, modePending, displayHeight, compact, veryCompact)
+                    Spacer(Modifier.height(if (veryCompact) 3.dp else sectionGap))
+                    Row(Modifier.fillMaxWidth().weight(1f).heightIn(min = if (veryCompact) 68.dp else if (compact) 82.dp else 150.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         names.forEachIndexed { i, label ->
-                            Fader(label, levels[i], i >= 4, Modifier.weight(1f)) { registerInteraction(); levels[i] = it }
-                        }
-                    }
-                    Spacer(Modifier.height(18.dp))
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                        listOf("PROGRAM", "STORE", "SOUND", "MODE", "BEAT").forEachIndexed { index, label ->
-                            if (index == 0) {
-                                ProgramStepper(Modifier.weight(2f), availableWidth, (availableWidth * .12f).coerceIn(38.dp, 52.dp),
-                                    onPrevious = { registerInteraction(); selectProgram(if(program == 1) PROGRAM_COUNT else program - 1) },
-                                    onNext = { registerInteraction(); selectProgram(program % PROGRAM_COUNT + 1) })
-                            } else {
-                                Column(Modifier.weight(1f).pointerInput(index, sound, mode, beatCount, backlightEnabled) {
-                                    detectTapGestures(
-                                        onTap = {
-                                            registerInteraction()
-                                            when(index) {
-                                                1 -> storeProgram()
-                                                2 -> sound = sound % SOUND_COUNT + 1
-                                                3 -> mode = (mode + 1) % 2
-                                                4 -> beatCount = (beatCount + 1) % 10
-                                            }
-                                        },
-                                        onLongPress = {
-                                            if (index == 1) {
-                                                registerInteraction()
-                                                backlightEnabled = !backlightEnabled
-                                                backlightAwake = backlightEnabled
-                                            }
-                                        }
-                                    )
-                                }, horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text(label, color = Labels, fontSize = (availableWidth.value * .022f).coerceIn(7f, 9f).sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                    Spacer(Modifier.height(8.dp))
-                                    val buttonSize = (availableWidth * .12f).coerceIn(38.dp, 52.dp)
-                                    HardwareButton(Modifier.size(buttonSize))
-                                }
+                            Fader(label, levels[i], i >= 4, Modifier.weight(1f), compact, veryCompact) {
+                                registerInteraction()
+                                controller?.setLevel(i, it)
                             }
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth().height(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Spacer(Modifier.weight(1f))
-                        Text("TEMPO", Modifier.width(transportHeight), color = Labels, fontWeight = FontWeight.Bold, fontSize = 10.sp, lineHeight = 14.sp, textAlign = TextAlign.Center)
-                    }
-                    Spacer(Modifier.height(5.dp))
-                    Row(Modifier.fillMaxWidth().height(transportHeight), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(if(playing) "■   STOP" else "▶   START / STOP", Modifier.weight(1f).fillMaxHeight().transportButtonSurface().pointerInput(playing) { detectTapGestures(onTap = {
-                        registerInteraction()
-                        val next = !playing
-                        playing = next // Give immediate visual feedback; audio stream work runs off the UI thread.
-                        val request = playbackRequest.incrementAndGet()
-                        if(next) {
-                            val serviceIntent = android.content.Intent(context, MetronomeService::class.java).setAction(MetronomeService.ACTION_START)
-                            ContextCompat.startForegroundService(context, serviceIntent)
-                            engine.reset()
-                            playbackScope.launch(audioDispatcher) {
-                                val started = playbackRequest.get() == request && engine.play(true)
-                                if (!started && playbackRequest.get() == request) {
-                                    withContext(Dispatchers.Main) {
-                                        if (playbackRequest.get() == request) {
-                                            playing = false
-                                            context.stopService(serviceIntent)
-                                        }
-                                    }
-                                } else if (!started) {
-                                    engine.play(false)
-                                    engine.close()
-                                }
+                    Spacer(Modifier.height(if (veryCompact) 4.dp else if (compact) 10.dp else 18.dp))
+                    if (veryCompact) {
+                        Row(Modifier.fillMaxWidth().height(compactControlsHeight), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            ProgramStepper(Modifier.weight(1.2f), availableWidth, controlButtonSize, compact = true,
+                                onPrevious = { registerInteraction(); controller?.selectProgram(if(program == 1) PROGRAM_COUNT else program - 1) },
+                                onNext = { registerInteraction(); controller?.selectProgram(program % PROGRAM_COUNT + 1) })
+                            listOf("STORE", "SOUND", "MODE", "BEAT").forEachIndexed { item, label ->
+                                val index = item + 1
+                                ControlButton(label, index, sound, mode, beatCount, controlButtonSize, compact = true,
+                                    modifier = Modifier.weight(.62f),
+                                    onActivate = { activateControl(index) },
+                                    onLongPress = { longPressControl(index) })
                             }
-                        } else {
-                            engine.play(false)
-                            context.stopService(android.content.Intent(context, MetronomeService::class.java).setAction(MetronomeService.ACTION_STOP))
-                            playbackScope.launch(audioDispatcher) { engine.close() }
+                            Text(when { playing -> "■ STOP"; starting -> "… START"; else -> "▶ START" }, Modifier.weight(1.65f).fillMaxHeight().transportButtonSurface().clickable(role = Role.Button, onClick = ::togglePlayback).wrapContentHeight(Alignment.CenterVertically), color = Silver, textAlign = TextAlign.Center, fontSize = 13.sp, fontWeight = FontWeight.Black, letterSpacing = .5.sp)
+                            TempoKnob(bpm, Modifier.size(50.dp)) {
+                                registerInteraction()
+                                tempoError = null
+                                tempoFlashing = false
+                                controller?.setTempo(it.coerceIn(30, 250))
+                            }
                         }
-                    }) }.wrapContentHeight(Alignment.CenterVertically), color = Silver, textAlign = TextAlign.Center, fontSize = 18.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
-                    TempoKnob(bpm, Modifier.size(transportHeight)) { registerInteraction(); tempoError = null; tempoFlashing = false; bpm = it.coerceIn(30,250) }
+                    } else {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                            ProgramStepper(Modifier.weight(2f), availableWidth, controlButtonSize,
+                                onPrevious = { registerInteraction(); controller?.selectProgram(if(program == 1) PROGRAM_COUNT else program - 1) },
+                                onNext = { registerInteraction(); controller?.selectProgram(program % PROGRAM_COUNT + 1) })
+                            listOf("STORE", "SOUND", "MODE", "BEAT").forEachIndexed { item, label ->
+                                val index = item + 1
+                                ControlButton(label, index, sound, mode, beatCount, controlButtonSize, compact,
+                                    Modifier.weight(1f),
+                                    onActivate = { activateControl(index) },
+                                    onLongPress = { longPressControl(index) })
+                            }
+                        }
+                        Spacer(Modifier.height(if (compact) 5.dp else 8.dp))
+                        Row(Modifier.fillMaxWidth().height(if (compact) 17.dp else 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(Modifier.weight(1f))
+                            Text("TEMPO", Modifier.width(transportHeight), color = Labels, fontWeight = FontWeight.Bold, fontSize = if (compact) 8.sp else 10.sp, lineHeight = if (compact) 11.sp else 14.sp, textAlign = TextAlign.Center)
+                        }
+                        Spacer(Modifier.height(if (compact) 3.dp else 5.dp))
+                        Row(Modifier.fillMaxWidth().height(transportHeight), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(when { playing -> "■   STOP"; starting -> "…   STARTING"; else -> "▶   START / STOP" }, Modifier.weight(1f).fillMaxHeight().transportButtonSurface().clickable(role = Role.Button, onClick = ::togglePlayback).wrapContentHeight(Alignment.CenterVertically), color = Silver, textAlign = TextAlign.Center, fontSize = if (compact) 14.sp else 18.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+                            TempoKnob(bpm, Modifier.size(transportHeight)) {
+                                registerInteraction()
+                                tempoError = null
+                                tempoFlashing = false
+                                controller?.setTempo(it.coerceIn(30, 250))
+                            }
+                        }
                     }
                 }
             }
@@ -324,12 +354,29 @@ private fun RhythmWatchApp(engine: AudioEngine, preferences: android.content.Sha
 }
 }
 
+private fun initialUiState(preferences: android.content.SharedPreferences): MetronomeUiState {
+    val defaults = MetronomeUiState()
+    val savedLevels = preferences.getString("last_levels", null)
+        ?.split(',')
+        ?.mapNotNull { raw -> raw.toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(0f, 1f) }
+        ?.takeIf { it.size == 6 }
+        ?: defaults.levels
+    return defaults.copy(
+        bpm = preferences.getInt("last_bpm", defaults.bpm).coerceIn(30, 250),
+        beatCount = preferences.getInt("last_beat", defaults.beatCount).coerceIn(0, 9),
+        sound = preferences.getInt("last_sound", defaults.sound).coerceIn(1, SOUND_COUNT),
+        program = preferences.getInt("last_program", defaults.program).coerceIn(1, PROGRAM_COUNT),
+        mode = preferences.getInt("last_mode", defaults.mode).coerceIn(0, 1),
+        levels = savedLevels
+    )
+}
+
 private fun Modifier.transportButtonSurface(): Modifier =
     clip(RoundedCornerShape(15.dp))
         .background(Brush.verticalGradient(listOf(Color(0xFF37393B), Color(0xFF111213))))
 
 @Composable
-private fun TapTempoButton(modifier: Modifier, onTap: () -> Unit) {
+private fun TapTempoButton(modifier: Modifier, compact: Boolean, onTap: () -> Unit) {
     Column(
         modifier.transportButtonSurface().clickable(role = Role.Button, onClick = onTap),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -337,16 +384,16 @@ private fun TapTempoButton(modifier: Modifier, onTap: () -> Unit) {
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             repeat(5) {
-                Box(Modifier.size(11.dp).clip(CircleShape).background(Color(0xFF050606)))
+                Box(Modifier.size(if (compact) 9.dp else 11.dp).clip(CircleShape).background(Color(0xFF050606)))
             }
         }
-        Spacer(Modifier.height(7.dp))
-        Text("TAP TEMPO", color = Silver, fontWeight = FontWeight.Black, fontSize = 18.sp, letterSpacing = 1.sp)
+        Spacer(Modifier.height(if (compact) 4.dp else 7.dp))
+        Text("TAP TEMPO", color = Silver, fontWeight = FontWeight.Black, fontSize = if (compact) 15.sp else 18.sp, letterSpacing = 1.sp)
     }
 }
 
 @Composable
-private fun LcdDisplay(bpm: Int, beat: Int, sound: Int, program: Int, playing: Boolean, modeName: String, storeConfirmation: Boolean, tempoError: String?, tempoFlashing: Boolean, backlightAwake: Boolean, batteryPercent: Int) {
+private fun LcdDisplay(bpm: Int, beat: Int, sound: Int, program: Int, playing: Boolean, modeName: String, storeConfirmation: Boolean, tempoError: String?, tempoFlashing: Boolean, backlightAwake: Boolean, batteryPercent: Int, audioError: Boolean, modePending: Boolean, displayHeight: androidx.compose.ui.unit.Dp, compact: Boolean, veryCompact: Boolean) {
     var flashVisible by remember { mutableStateOf(true) }
     LaunchedEffect(tempoFlashing) {
         flashVisible = true
@@ -354,18 +401,34 @@ private fun LcdDisplay(bpm: Int, beat: Int, sound: Int, program: Int, playing: B
     }
     val ink = if (backlightAwake) LCDInk else Color(0xFF6E858E)
     val display = if (backlightAwake) Brush.verticalGradient(listOf(Color(0xFF28C9F3), Color(0xFF4AD8FA), Color(0xFF21BEEB))) else Brush.verticalGradient(listOf(Color(0xFF0A2027), Color(0xFF102A32), Color(0xFF08191F)))
-    Column(Modifier.fillMaxWidth().height(132.dp).clip(RoundedCornerShape(12.dp)).background(display).padding(horizontal = 9.dp, vertical = 9.dp)) {
+    val density = LocalDensity.current
+    val titleFontSize = if (veryCompact) 8.sp else if (compact) 9.sp else 10.sp
+    val statusFontSize = if (compact) 8.sp else 9.sp
+    val titleHeight = maxOf(
+        if (veryCompact) 13.dp else if (compact) 15.dp else 18.dp,
+        with(density) { titleFontSize.toDp() + 2.dp }
+    )
+    val statusHeight = maxOf(
+        if (veryCompact) 14.dp else if (compact) 16.dp else 18.dp,
+        with(density) { statusFontSize.toDp() + 2.dp }
+    )
+    val mainValueSize = if (veryCompact) 34.sp else if (compact) 45.sp else 57.sp
+    val secondaryValueSize = if (veryCompact) 25.sp else if (compact) 30.sp else 37.sp
+    Column(Modifier.fillMaxWidth().height(displayHeight).clip(RoundedCornerShape(12.dp)).background(display).padding(horizontal = if (compact) 6.dp else 9.dp, vertical = if (compact) 4.dp else 9.dp)) {
         Row(Modifier.fillMaxWidth().weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            LcdField(modeName, program.toString().padStart(2, '0'), 37.sp, ink, Modifier.weight(1.3f))
+            LcdField(modeName, program.toString().padStart(2, '0'), secondaryValueSize, titleHeight, titleFontSize, ink, Modifier.weight(1.3f))
             DividerLine(ink)
-            LcdField("TEMPO", tempoError ?: bpm.toString(), if(tempoError != null) 47.sp else 57.sp, ink, Modifier.weight(2.2f), if(tempoFlashing && !flashVisible) 0f else 1f)
+            val tempoDisplaySize = if (tempoError != null || audioError) {
+                if (veryCompact) 31.sp else if (compact) 38.sp else 47.sp
+            } else mainValueSize
+            LcdField("TEMPO", if (audioError) "Err" else tempoError ?: bpm.toString(), tempoDisplaySize, titleHeight, titleFontSize, ink, Modifier.weight(2.2f), if(tempoFlashing && !flashVisible) 0f else 1f)
             DividerLine(ink)
-            LcdField("BEAT", beat.toString(), 37.sp, ink, Modifier.weight(.9f))
+            LcdField("BEAT", beat.toString(), secondaryValueSize, titleHeight, titleFontSize, ink, Modifier.weight(.9f))
             DividerLine(ink)
-            LcdField("SOUND", sound.toString(), 37.sp, ink, Modifier.weight(.8f))
+            LcdField("SOUND", sound.toString(), secondaryValueSize, titleHeight, titleFontSize, ink, Modifier.weight(.8f))
         }
-        Spacer(Modifier.height(4.dp))
-        Row(Modifier.fillMaxWidth().height(18.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Spacer(Modifier.height(if (compact) 2.dp else 4.dp))
+        Row(Modifier.fillMaxWidth().height(statusHeight).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Canvas(Modifier.width(12.dp).height(7.dp)) {
                     val stroke = .8.dp.toPx()
@@ -375,10 +438,13 @@ private fun LcdDisplay(bpm: Int, beat: Int, sound: Int, program: Int, playing: B
                     val inset = 1.5.dp.toPx()
                     drawRect(ink, Offset(inset, inset), Size((bodyWidth - inset * 2) * batteryPercent / 100f, size.height - inset * 2))
                 }
-                Text("${batteryPercent}%", color = ink, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                Text("${batteryPercent}%", color = ink, fontSize = statusFontSize, fontWeight = FontWeight.SemiBold)
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                if (storeConfirmation) Text("✓ STORED", color = ink, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                when {
+                    storeConfirmation -> Text("✓ STORED", color = ink, fontSize = statusFontSize, fontWeight = FontWeight.Bold, maxLines = 1)
+                    modePending -> Text("MODE NEXT START", color = ink, fontSize = statusFontSize, fontWeight = FontWeight.Bold, maxLines = 1)
+                }
             }
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) {
                 Canvas(Modifier.size(7.dp)) {
@@ -388,17 +454,17 @@ private fun LcdDisplay(bpm: Int, beat: Int, sound: Int, program: Int, playing: B
                         drawRect(ink)
                     }
                 }
-                Text(if (playing) "PLAY" else "STOP", color = ink, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Text(if (audioError) "ERROR" else if (playing) "PLAY" else "STOP", color = ink, fontSize = statusFontSize, fontWeight = FontWeight.Bold)
             }
         }
     }
 }
 
 @Composable
-private fun LcdField(title: String, value: String, valueSize: androidx.compose.ui.unit.TextUnit, ink: Color, modifier: Modifier, valueAlpha: Float = 1f) {
+private fun LcdField(title: String, value: String, valueSize: androidx.compose.ui.unit.TextUnit, titleHeight: androidx.compose.ui.unit.Dp, titleFontSize: androidx.compose.ui.unit.TextUnit, ink: Color, modifier: Modifier, valueAlpha: Float = 1f) {
     Column(modifier.fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.fillMaxWidth().height(18.dp), contentAlignment = Alignment.Center) {
-            Text(title, color = ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Box(Modifier.fillMaxWidth().height(titleHeight), contentAlignment = Alignment.Center) {
+            Text(title, color = ink, fontSize = titleFontSize, fontWeight = FontWeight.Bold, maxLines = 1)
         }
         Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             SegmentNumber(value, valueSize, ink, valueAlpha)
@@ -433,39 +499,98 @@ private fun HardwareButton(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ProgramStepper(modifier: Modifier, width: androidx.compose.ui.unit.Dp, buttonSize: androidx.compose.ui.unit.Dp, onPrevious: () -> Unit, onNext: () -> Unit) {
+private fun ProgramStepper(modifier: Modifier, width: androidx.compose.ui.unit.Dp, buttonSize: androidx.compose.ui.unit.Dp, compact: Boolean = false, onPrevious: () -> Unit, onNext: () -> Unit) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("PROGRAM", color = Labels, fontSize = (width.value * .022f).coerceIn(7f, 9f).sp, fontWeight = FontWeight.Bold, maxLines = 1)
-        Spacer(Modifier.height(8.dp))
+        Text("PROGRAM", color = Labels, fontSize = if (compact) 7.sp else (width.value * .022f).coerceIn(7f, 9f).sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Spacer(Modifier.height(if (compact) 3.dp else 8.dp))
         Row(Modifier.fillMaxWidth()) {
-            listOf(onPrevious, onNext).forEach { action ->
+        listOf("Program precedente" to onPrevious, "Program successivo" to onNext).forEach { (description, action) ->
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    Box(Modifier.size(buttonSize).pointerInput(Unit) { detectTapGestures(onTap = { action() }) }) {
-                        HardwareButton(Modifier.fillMaxSize())
+                    Box(Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).clickable(role = Role.Button, onClick = action).semantics {
+                        contentDescription = description
+                    }, contentAlignment = Alignment.Center) {
+                        HardwareButton(Modifier.size(buttonSize))
                     }
                 }
             }
         }
-        Row(Modifier.fillMaxWidth()) {
-            Text("−", color = Silver, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
-            Text("+", color = Silver, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+        if (!compact) {
+            Row(Modifier.fillMaxWidth()) {
+                Text("−", color = Silver, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                Text("+", color = Silver, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+            }
         }
     }
 }
 
 @Composable
-private fun Fader(label: String, value: Float, accent: Boolean, modifier: Modifier, onChange: (Float) -> Unit) {
+private fun ControlButton(
+    label: String,
+    index: Int,
+    sound: Int,
+    mode: Int,
+    beatCount: Int,
+    buttonSize: androidx.compose.ui.unit.Dp,
+    compact: Boolean,
+    modifier: Modifier,
+    onActivate: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    val latestActivate by rememberUpdatedState(onActivate)
+    val latestLongPress by rememberUpdatedState(onLongPress)
+    Column(
+        modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).pointerInput(index, sound, mode, beatCount) {
+            detectTapGestures(onTap = { latestActivate() }, onLongPress = { latestLongPress() })
+        }.semantics {
+            contentDescription = label
+            role = Role.Button
+            when (index) {
+                2 -> stateDescription = "Sound $sound"
+                3 -> stateDescription = if (mode == 0) "Practice" else "Stage"
+                4 -> stateDescription = "$beatCount beats per bar"
+            }
+            onClick { latestActivate(); true }
+            if (index == 1) onLongClick { latestLongPress(); true }
+        },
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(label, color = Labels, fontSize = if (compact) 6.sp else 8.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Spacer(Modifier.height(if (compact) 2.dp else 8.dp))
+        HardwareButton(Modifier.size(buttonSize))
+    }
+}
+
+@Composable
+private fun Fader(label: String, value: Float, accent: Boolean, modifier: Modifier, compact: Boolean, veryCompact: Boolean, onChange: (Float) -> Unit) {
     val active = if(accent) Color(0xFF3EE0FF) else Color(0xFF13C7FF)
-    Column(modifier.fillMaxHeight().clip(RoundedCornerShape(9.dp)).background(Brush.verticalGradient(listOf(Color(0xFF25272A), Color(0xFF111214)))).padding(vertical = 7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.fillMaxWidth().height(14.dp), contentAlignment = Alignment.Center) {
-            Text(label, Modifier.padding(horizontal = 3.dp), color = Labels, fontSize = 8.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    val density = LocalDensity.current
+    val labelFontSize = if (compact) 6.sp else 8.sp
+    val valueFontSize = if (compact) 10.sp else 12.sp
+    val labelHeight = maxOf(
+        if (veryCompact) 11.dp else if (compact) 12.dp else 14.dp,
+        with(density) { labelFontSize.toDp() + 2.dp }
+    )
+    val valueHeight = maxOf(
+        if (compact) 14.dp else 18.dp,
+        with(density) { valueFontSize.toDp() + 2.dp }
+    )
+    val displayLabel = if (compact) when (label) {
+        "QUARTER" -> "QUART"
+        "EIGHTH" -> "8TH"
+        "SIXTEENTH" -> "16TH"
+        "TRIPLET" -> "TRIP"
+        else -> label
+    } else label
+    Column(modifier.fillMaxHeight().clip(RoundedCornerShape(9.dp)).background(Brush.verticalGradient(listOf(Color(0xFF25272A), Color(0xFF111214)))).padding(vertical = if (veryCompact) 3.dp else if (compact) 5.dp else 7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.Center) {
+            Text(displayLabel, Modifier.padding(horizontal = 2.dp), color = Labels, fontSize = labelFontSize, fontWeight = FontWeight.Bold, maxLines = 1)
         }
-        Box(Modifier.fillMaxWidth().height(32.dp), contentAlignment = Alignment.Center) {
-            if (label != "BEAT") FaderIcon(label, Modifier.size(28.dp))
+        Box(Modifier.fillMaxWidth().height(if (veryCompact) 18.dp else if (compact) 24.dp else 32.dp), contentAlignment = Alignment.Center) {
+            if (label != "BEAT") FaderIcon(label, Modifier.size(if (veryCompact) 18.dp else if (compact) 22.dp else 28.dp))
         }
-        VerticalFader(value, active, Modifier.weight(1f).fillMaxWidth()) { onChange(it) }
-        Box(Modifier.fillMaxWidth().height(18.dp), contentAlignment = Alignment.Center) {
-            Text("${(value*100).roundToInt()}", color = Silver, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        VerticalFader(label, value, active, Modifier.weight(1f).fillMaxWidth(), compact, veryCompact) { onChange(it) }
+        Box(Modifier.fillMaxWidth().height(valueHeight), contentAlignment = Alignment.Center) {
+            Text("${(value*100).roundToInt()}", color = Silver, fontFamily = FontFamily.Monospace, fontSize = valueFontSize, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -521,16 +646,24 @@ private fun FaderIcon(label: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun VerticalFader(value: Float, color: Color, modifier: Modifier, onChange: (Float) -> Unit) {
+private fun VerticalFader(label: String, value: Float, color: Color, modifier: Modifier, compact: Boolean, veryCompact: Boolean, onChange: (Float) -> Unit) {
     val latestValue by rememberUpdatedState(value)
     val latestOnChange by rememberUpdatedState(onChange)
-    val knobHalfPx = with(LocalDensity.current) { 20.dp.toPx() }
+    val knobHalfDp = if (veryCompact) 13.dp else if (compact) 16.dp else 20.dp
+    val knobHalfPx = with(LocalDensity.current) { knobHalfDp.toPx() }
+    fun knobMargin(height: Float) = kotlin.math.min(knobHalfPx, height * .32f)
     fun valueAt(y: Float, height: Float): Float {
-        val top = knobHalfPx
-        val bottom = (height - knobHalfPx).coerceAtLeast(top + 1f)
+        val margin = knobMargin(height)
+        val top = margin
+        val bottom = (height - margin).coerceAtLeast(top + 1f)
         return (1f - (y - top) / (bottom - top)).coerceIn(0f, 1f)
     }
-    Canvas(modifier.pointerInput(Unit) {
+    Canvas(modifier.semantics {
+        contentDescription = "$label volume"
+        stateDescription = "${(value * 100).roundToInt()} percent"
+        progressBarRangeInfo = ProgressBarRangeInfo(value, 0f..1f)
+        setProgress { target -> latestOnChange(target.coerceIn(0f, 1f)); true }
+    }.pointerInput(Unit) {
         detectTapGestures(
             onTap = { position ->
                 latestOnChange(valueAt(position.y, size.height.toFloat()))
@@ -550,8 +683,9 @@ private fun VerticalFader(value: Float, color: Color, modifier: Modifier, onChan
     }) {
         val trackW = size.width * .42f
         val x = (size.width-trackW)/2
-        val top = knobHalfPx
-        val bottom = (size.height-knobHalfPx).coerceAtLeast(top+1f)
+        val margin = knobMargin(size.height)
+        val top = margin
+        val bottom = (size.height-margin).coerceAtLeast(top+1f)
         drawRoundRect(Color(0xFF030405), Offset(x,top), Size(trackW,bottom-top), cornerRadius=androidx.compose.ui.geometry.CornerRadius(trackW/2))
         val y=value*(bottom-top)
         drawRoundRect(Brush.verticalGradient(listOf(Color(0xFF0877B6),color,Color(0xFF0877B6))), Offset(x+trackW*.26f,bottom-y), Size(trackW*.48f,y), cornerRadius=androidx.compose.ui.geometry.CornerRadius(trackW/3))
@@ -561,9 +695,11 @@ private fun VerticalFader(value: Float, color: Color, modifier: Modifier, onChan
             drawLine(Color(0xFF777B7F), Offset(size.width*.79f,ty), Offset(size.width,ty), 1.dp.toPx())
         }
         val knobY=bottom-(bottom-top)*value
-        drawRoundRect(Color(0xFF030405), Offset(size.width*.20f,knobY-20.dp.toPx()), Size(size.width*.60f,40.dp.toPx()), cornerRadius=androidx.compose.ui.geometry.CornerRadius(7.dp.toPx()))
-        drawRoundRect(Brush.verticalGradient(listOf(Color(0xFF777A7D),Color(0xFF17191B),Color(0xFF44474A))), Offset(size.width*.24f,knobY-18.dp.toPx()), Size(size.width*.52f,36.dp.toPx()), cornerRadius=androidx.compose.ui.geometry.CornerRadius(6.dp.toPx()))
-        for(i in -1..2) drawLine(Color(0xFF9EA2A6), Offset(size.width*.29f,knobY+i*7.dp.toPx()), Offset(size.width*.71f,knobY+i*7.dp.toPx()), 1.dp.toPx())
+        val knobHeight = margin * 2
+        drawRoundRect(Color(0xFF030405), Offset(size.width*.20f,knobY-margin), Size(size.width*.60f,knobHeight), cornerRadius=androidx.compose.ui.geometry.CornerRadius(7.dp.toPx()))
+        drawRoundRect(Brush.verticalGradient(listOf(Color(0xFF777A7D),Color(0xFF17191B),Color(0xFF44474A))), Offset(size.width*.24f,knobY-margin*.9f), Size(size.width*.52f,knobHeight*.9f), cornerRadius=androidx.compose.ui.geometry.CornerRadius(6.dp.toPx()))
+        val grooveStep = knobHeight / 5
+        for(i in -1..2) drawLine(Color(0xFF9EA2A6), Offset(size.width*.29f,knobY+i*grooveStep), Offset(size.width*.71f,knobY+i*grooveStep), 1.dp.toPx())
     }
 }
 
@@ -572,12 +708,16 @@ private fun TempoKnob(value: Int, modifier: Modifier, onChange: (Int) -> Unit) {
     val latestValue by rememberUpdatedState(value)
     val latestOnChange by rememberUpdatedState(onChange)
     val density = LocalDensity.current.density
-    Box(modifier.pointerInput(Unit) {
-            var startValue = latestValue
-            var accumulatedDrag = 0f
+    Box(modifier.semantics {
+            contentDescription = "Tempo"
+            stateDescription = "$value BPM"
+            progressBarRangeInfo = ProgressBarRangeInfo(value.toFloat(), 30f..250f, 219)
+            setProgress { target -> latestOnChange(target.roundToInt().coerceIn(30, 250)); true }
+        }.pointerInput(Unit) {
+            var dragValue = latestValue.toFloat()
             var lastDragTime = 0L
             detectDragGestures(
-                onDragStart = { startValue = latestValue; accumulatedDrag = 0f; lastDragTime = android.os.SystemClock.uptimeMillis() },
+                onDragStart = { dragValue = latestValue.toFloat(); lastDragTime = android.os.SystemClock.uptimeMillis() },
                 onDrag = { change, drag ->
                     change.consume()
                     val elapsedMs = (change.uptimeMillis - lastDragTime).coerceAtLeast(1L)
@@ -588,8 +728,8 @@ private fun TempoKnob(value: Int, modifier: Modifier, onChange: (Int) -> Unit) {
                         speedDpPerSecond < 500f -> .30f + (speedDpPerSecond - 100f) / 400f * 1.20f
                         else -> 1.5f
                     }
-                    accumulatedDrag += -drag.y / density * sensitivity
-                    latestOnChange((startValue + accumulatedDrag).roundToInt().coerceIn(30,250))
+                    dragValue = (dragValue - drag.y / density * sensitivity).coerceIn(30f, 250f)
+                    latestOnChange(dragValue.roundToInt())
                 }
             )
         }, contentAlignment = Alignment.Center) {

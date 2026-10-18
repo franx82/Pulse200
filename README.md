@@ -86,12 +86,24 @@ To run Android lint:
 
 The application ID remains `com.rhythmwatch` for compatibility with existing installations. Updating without losing app data also requires the same signing key.
 
+Run the Android unit tests, lint, and debug build with:
+
+```sh
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+The native renderer tests can be run independently with CMake and CTest:
+
+```sh
+cmake -S tests/native -B /tmp/pulse200-native-build -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/pulse200-native-build
+ctest --test-dir /tmp/pulse200-native-build --output-on-failure
+```
+
 ## Development status
 
-Pulse 200 is a **development preview**. Audio is rendered in the Oboe callback; its scheduling does not rely on a UI timer. A code review nevertheless found timing and lifecycle defects that still need correction, including subdivision drift, event timing within audio blocks, and playback state after Activity recreation. Acoustic latency and jitter have not been measured.
+Pulse 200 is a **development preview**. The reviewed timing, playback ownership, mode, and Tap Tempo fixes are implemented, with deterministic native and Android unit tests. The local native tests, Android unit tests, lint, and debug build pass; the APK also passes the 16 KB alignment check.
 
-The [implementation plan](docs/PIANO-INTERVENTI-REVIEW.md) tracks these fixes, their order, and acceptance criteria. It also covers the currently failing GitHub build setup, smaller screens, accessibility, and release signing. The plan is currently in Italian.
-
-The latest local checks passed compilation and lint. Native library alignment and APK packaging were checked for 16 KB pages; runtime testing on a device using 16 KB pages is still pending.
+On the Pixel, the user reports successful checks for start/stop, background playback and notifications, Practice/Stage, Tap Tempo, settings persistence, portrait/landscape layouts, larger text, TalkBack, and resizing in split-screen. Output changes, explicit Activity recreation, and acoustic latency remain unverified. GitHub Actions and its uploaded APK artifact have not yet been verified. Release signing is not configured. The [implementation plan](docs/PIANO-INTERVENTI-REVIEW.md) tracks the remaining checks and distribution decisions; the plan is currently in Italian.
 
 Sounds are synthesized rather than recordings of the original hardware. Pulse 200 is an independent project inspired by the RW200 and is not affiliated with TAMA.

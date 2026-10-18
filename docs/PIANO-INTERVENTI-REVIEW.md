@@ -20,10 +20,10 @@ Questo documento ordina i lavori emersi dalla review. Le caselle restano non sel
 
 Riferimenti principali: [`rhythm_engine.cpp`](../app/src/main/cpp/rhythm_engine.cpp), in particolare schedulazione e rendering del callback.
 
-- [ ] **F01 — Non anticipare né perdere eventi nel blocco audio.** Conservare gli eventi futuri come pendenti o suddividere il rendering del blocco ai loro campioni; non attivare una voce prima del relativo `startFrame`. Supportare più eventi della stessa voce nello stesso blocco senza sovrascriverli.
-- [ ] **F02 — Usare un’unica griglia musicale frazionaria.** Derivare quarti e suddivisioni dallo stesso riferimento temporale, arrotondando la posizione del singolo evento e non il periodo da sommare ripetutamente. Un cambio BPM deve mantenere una fase coerente.
-- [ ] **F04 — Iniziare il conteggio quando il motore passa davvero a PLAY.** Una callback silenziosa precedente non deve consumare il reset né far saltare il primo colpo.
-- [ ] Aggiungere test deterministici del renderer per evento al campione corretto, eventi ravvicinati/sovrapposti, deriva su tempi non divisibili e primo colpo dopo start.
+- [x] **F01 — Non anticipare né perdere eventi nel blocco audio.** Conservare gli eventi futuri come pendenti o suddividere il rendering del blocco ai loro campioni; non attivare una voce prima del relativo `startFrame`. Supportare più eventi della stessa voce nello stesso blocco senza sovrascriverli.
+- [x] **F02 — Usare un’unica griglia musicale frazionaria.** Derivare quarti e suddivisioni dallo stesso riferimento temporale, arrotondando la posizione del singolo evento e non il periodo da sommare ripetutamente. Un cambio BPM deve mantenere una fase coerente.
+- [x] **F04 — Iniziare il conteggio quando il motore passa davvero a PLAY.** Una callback silenziosa precedente non deve consumare il reset né far saltare il primo colpo.
+- [x] Aggiungere test deterministici del renderer per evento al campione corretto, eventi ravvicinati/sovrapposti, deriva su tempi non divisibili e primo colpo dopo start.
 
 **Criteri di completamento**
 
@@ -45,9 +45,11 @@ flowchart LR
 ```
 
 - [ ] **F03 — Rendere lo stato di riproduzione indipendente dall’Activity.** Il servizio/controller possiede playback, modalità della sessione e completamento Stage. La UI osserva lo stato effettivo e invia comandi; ricreare l’Activity non deve mostrare uno stato falso o perdere il cambio programma previsto.
-- [ ] **F06 — Serializzare start, stop, reset e close.** Usare un solo proprietario e una sola coda/serializzazione dei comandi; eliminare chiusure concorrenti da facade distinti e thread non tracciati. Una chiusura vecchia non deve poter fermare una sessione nuova.
+- [x] **F06 — Serializzare start, stop, reset e close.** Usare un solo proprietario e una sola coda/serializzazione dei comandi; eliminare chiusure concorrenti da facade distinti e thread non tracciati. Una chiusura vecchia non deve poter fermare una sessione nuova. Verificati sul Pixel i comandi rapidi senza sessioni fantasma.
 - [ ] **F05 — Recuperare in modo coerente da disconnessione audio.** Invalidare lo stream chiuso, riportare al controller lo stato reale e definire riapertura oppure arresto con errore visibile. Non dichiarare PLAY se l’uscita non è attiva.
-- [ ] Verificare transizioni rapide START/STOP, passaggio in background, ritorno in app e ricreazione dell’Activity. Eseguire sul Pixel anche almeno una prova di cambio uscita/cuffie quando disponibile.
+- [x] Verificare transizioni rapide START/STOP, passaggio in background e ritorno in app; notifica e stato restano coerenti.
+- [ ] Verificare una ricreazione esplicita dell’Activity durante il playback.
+- [ ] Eseguire sul Pixel una prova di cambio uscita/cuffie quando disponibile.
 
 **Criteri di completamento**
 
@@ -57,9 +59,9 @@ flowchart LR
 
 ## Fase 3 — allineare modalità e Tap Tempo allo stato reale
 
-- [ ] **F07 — Definire quando MODE diventa attivo durante una sessione.** Scegliere una semantica unica (per esempio al prossimo avvio oppure al confine della battuta), rappresentarla correttamente sul display e applicarla nel controller. Mantenere identici gli accenti tra Practice e Stage: cambia soltanto la conclusione automatica dopo otto battute.
-- [ ] **F08 — Calcolare il Tap Tempo dalla media degli intervalli.** Usare `60000 / media(intervalli)` con esclusione degli intervalli non validi. Conservare la soglia dei cinque tocchi e il lampeggio veloce di un secondo già verificati sul fisico.
-- [ ] Aggiungere test per tempi regolari e irregolari, timeout della sequenza, limiti BPM e transizioni MODE concordate.
+- [x] **F07 — Definire quando MODE diventa attivo durante una sessione.** MODE cambia alla sessione successiva; mentre l’audio è attivo il display segnala il cambio in attesa. Practice e Stage mantengono gli stessi accenti; Stage aggiunge solo l’arresto automatico dopo otto battute.
+- [x] **F08 — Calcolare il Tap Tempo dalla media degli intervalli.** Usare `60000 / media(intervalli)` con esclusione degli intervalli non validi. Conservare la soglia dei cinque tocchi e il lampeggio veloce di un secondo già verificati sul fisico.
+- [x] Aggiungere test per tempi regolari e irregolari, timeout della sequenza, limiti BPM e transizioni MODE concordate.
 
 **Criteri di completamento**
 
@@ -71,7 +73,7 @@ flowchart LR
 
 Riferimento: [workflow Android](../.github/workflows/android.yml).
 
-- [ ] **F10 — Correggere l’installazione SDK del workflow.** Rimuovere il pacchetto Android `tools` non più disponibile dalla configurazione o usare componenti SDK validi già presenti sul runner.
+- [x] **F10 — Correggere l’installazione SDK del workflow.** Il workflow non contiene il pacchetto Android `tools`; i componenti SDK elencati sono stati installati e la build locale è riuscita.
 - [ ] Eseguire nella pipeline compilazione, lint e test deterministici introdotti nelle fasi audio e di stato.
 - [ ] Verificare che un errore in ciascun passaggio fallisca la run e che l’APK venga pubblicato come artefatto solo dopo controlli riusciti.
 
@@ -79,20 +81,20 @@ Riferimento: [workflow Android](../.github/workflows/android.yml).
 
 ## Fase 5 — layout adattabile e accessibile
 
-- [ ] **F09 — Rivedere il layout per schermi bassi e landscape.** Prevedere una variante compatta mantenendo l’interfaccia senza scroll. Verificare anche dimensioni font di sistema maggiori.
-- [ ] Controllare che label e controlli non vengano tagliati e che i fader conservino area touch larga quanto la scala ai loro lati.
-- [ ] Aggiungere semantica TalkBack e azioni accessibili per START/STOP, Tap, programmi, modalità, beat, manopola e fader (valore/range inclusi). Verificare attivazione senza gesti di trascinamento.
-- [ ] Verificare una matrice minima: Pixel portrait, display più basso, landscape e font ingrandito.
+- [x] **F09 — Rivedere il layout per schermi bassi e landscape.** Prevedere una variante compatta mantenendo l’interfaccia senza scroll. Verificare anche dimensioni font di sistema maggiori e viewport ridotti.
+- [x] Controllare che label e controlli non vengano tagliati e che i fader conservino area touch larga quanto la scala ai loro lati sul Pixel in portrait e landscape.
+- [x] Aggiungere semantica TalkBack e azioni accessibili per START/STOP, Tap, programmi, modalità, beat, manopola e fader (valore/range inclusi). Verificare attivazione senza gesti di trascinamento.
+- [x] Verificare sul Pixel portrait, landscape, font ingrandito e ridimensionamento in split screen.
 
 **Criterio di completamento:** nessuna sovrapposizione o contenuto irraggiungibile nella matrice; tutte le funzioni essenziali sono identificabili e azionabili con screen reader.
 
 ## Fase 6 — comportamento di sistema e robustezza
 
 - [ ] Definire e implementare la politica di audio focus e la risposta alla perdita/cambio dell’uscita, tenendo conto dell’uso del metronomo insieme a basi musicali.
-- [ ] Rendere la notifica di playback utile e coerente con il controller; valutare permesso notifiche e azione STOP in notifica secondo le versioni Android supportate.
-- [ ] Accorpare i salvataggi delle preferenze durante il movimento continuo dei fader, mantenendo l’aggiornamento sonoro immediato.
-- [ ] Correggere i casi limite del gesto tempo: velocità iniziale basata su timestamp coerenti e inversione dopo aver raggiunto 30/250 BPM senza zona morta.
-- [ ] Validare lato JNI la lunghezza dell’array e i valori finiti prima di leggere/applicare i livelli.
+- [x] Rendere la notifica di playback utile e coerente con il controller; verificati permesso notifiche e azione STOP.
+- [x] Accorpare i salvataggi delle preferenze durante il movimento continuo dei fader, mantenendo l’aggiornamento sonoro immediato.
+- [x] Correggere i casi limite del gesto tempo: velocità iniziale basata su timestamp coerenti e inversione dopo aver raggiunto 30/250 BPM senza zona morta.
+- [x] Validare lato JNI la lunghezza dell’array e i valori finiti prima di leggere/applicare i livelli.
 - [ ] Aggiungere diagnostica debug per sample rate, frames-per-burst, buffer, xrun e stato stream. Usarla per misurare prima di eventuali ottimizzazioni o smoothing.
 
 ## Fase 7 — preparare la distribuzione stabile
@@ -121,5 +123,10 @@ Riferimento: [workflow Android](../.github/workflows/android.yml).
 ## Note di avanzamento
 
 - Review iniziale: 18 ottobre 2026.
-- Correzioni di codice incluse in questo piano: nessuna.
+- F01/F02/F04 e F07/F08 sono implementati; i test deterministici C++ e i test unitari Tap Tempo/MODE passano localmente.
+- Il controller nel servizio, il recupero audio, notifiche e stop, persistenza differita, validazione JNI, diagnostica debug e layout/accessibilità sono stati implementati. La fase 5 è stata verificata sul Pixel; restano aperte le verifiche delle fasi 2 e 6 indicate sopra.
+- Test su Pixel riportati dall’utente il 18 ottobre: superati avvio/arresto, background/notifica, Practice/Stage e cambio MODE, Tap Tempo/limiti/persistenza, portrait/landscape/font ingrandito, TalkBack e ridimensionamento in split screen. Rimangono da provare il cambio uscita/cuffie e la ricreazione esplicita dell’Activity.
+- Il workflow ora esegue test nativi, test Android, lint e build prima dell’upload APK. Tutti questi controlli passano localmente; una run GitHub Actions e il relativo artefatto non sono ancora stati verificati.
+- Il cambio uscita/cuffie resta il controllo audio hardware aperto; latenza e jitter acustici non sono stati misurati.
+- Non sono state configurate firma o pubblicazione release: canale e chiave stabile restano decisioni di distribuzione.
 - Modifiche locali già presenti prima del piano: `README.md`, `app/build.gradle.kts`, `app/src/main/cpp/CMakeLists.txt`, `app/src/main/java/com/rhythmwatch/MainActivity.kt`. Non annullarle durante gli interventi.
